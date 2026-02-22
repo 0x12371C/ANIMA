@@ -18,6 +18,11 @@ const veil = createClient('https://rpc.veil.markets', {
   xaiApiKey: process.env.XAI_API_KEY,
 });
 
+// Prototype note:
+// - read methods work without a signer
+// - write methods require config.signer
+// - the SDK currently derives/uses the sender address but does not perform local tx signing
+
 // Check connection
 await veil.ping(); // true
 
@@ -55,6 +60,12 @@ const score = await veil.getBloodsworn('0x...');
 console.log(score.tier);        // 'blooded'
 console.log(score.composite);   // 0.73
 console.log(score.canReplicate); // false (need sovereign + 0.85)
+
+// Event subscriptions use polling (no websocket push yet)
+const off = veil.on({ eventType: 'MarketResolved' }, (event) => {
+  console.log(event.name, event.blockNumber);
+});
+// later: off();
 ```
 
 ## Architecture
@@ -97,6 +108,15 @@ const truth = await oracle.query({
 // Multi-query consensus (3 independent calls must agree)
 const verified = await oracle.queryWithConsensus(query, 3);
 ```
+
+## Event subscriptions (prototype)
+
+`client.on(filter, callback)` uses polling over `veil_events_query` on a timer. It is not a server-push subscription yet.
+
+- `getEvents(filter)` is the explicit historical query API.
+- `on()` is best-effort polling for new matching events while listeners are registered.
+- `on()` does not backfill by default; without `fromBlock`, it starts watching from the next block.
+- If you need deterministic backfill, call `getEvents()` with `fromBlock`/`toBlock` and track your own cursor.
 
 ## No users. Only developers.
 

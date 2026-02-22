@@ -8,6 +8,7 @@ import type {
   TransactionReceipt,
   Identity,
   ZeroIdProof,
+  Signer,
   Agent,
   AgentState,
   BloodswornScore,
@@ -20,21 +21,31 @@ import type {
   VeilEventCallback,
   ChainEvent,
 } from './types.js';
+import { computeAddress, getAddress } from 'ethers';
 import { XaiOracle } from './oracle.js';
 
 const VEIL_CHAIN_ID = 22207;
+const DEFAULT_EVENT_POLL_INTERVAL_MS = 2_000;
+
+interface EventSubscriptionState {
+  filter: VeilEventFilter;
+  callbacks: VeilEventCallback[];
+  nextFromBlock?: number;
+}
 
 export class VeilClient {
   private rpcUrl: string;
   private chainId: number;
-  private signerKey?: string;
+  private signerAddress?: string;
   private oracle: XaiOracle | null;
-  private eventListeners: Map<string, VeilEventCallback[]> = new Map();
+  private eventListeners: Map<string, EventSubscriptionState> = new Map();
+  private eventPollTimer?: ReturnType<typeof setInterval>;
+  private eventPollingInFlight = false;
 
   constructor(config: VeilChainConfig) {
     this.rpcUrl = config.rpcUrl;
     this.chainId = config.chainId ?? VEIL_CHAIN_ID;
-    this.signerKey = typeof config.signer === 'string' ? config.signer : undefined;
+    this.signerAddress = this.resolveSignerAddress(config.signer);
     this.oracle = config.xaiApiKey
       ? new XaiOracle(config.xaiApiKey, config.xaiEndpoint)
       : null;
@@ -46,7 +57,8 @@ export class VeilClient {
 
   /** Get current block number */
   async getBlockNumber(): Promise<number> {
-    return this.rpcCall<number>('eth_blockNumber');
+    const blockNumber = await this.rpcCall<string>('eth_blockNumber');
+    return this.parseQuantity(blockNumber, 'eth_blockNumber');
   }
 
   /** Get chain ID (should be 22207) */
@@ -284,15 +296,33 @@ export class VeilClient {
   /** Subscribe to chain events */
   on(filter: VeilEventFilter, callback: VeilEventCallback): () => void {
     const key = JSON.stringify(filter);
-    const existing = this.eventListeners.get(key) ?? [];
-    existing.push(callback);
-    this.eventListeners.set(key, existing);
+    const existing = this.eventListeners.get(key);
+    if (existing) {
+      existing.callbacks.push(callback);
+    } else {
+      this.eventListeners.set(key, {
+        filter: { ...filter },
+        callbacks: [callback],
+      });
+    }
+
+    this.ensureEventPolling();
 
     // Return unsubscribe function
     return () => {
-      const cbs = this.eventListeners.get(key) ?? [];
-      const idx = cbs.indexOf(callback);
-      if (idx >= 0) cbs.splice(idx, 1);
+      const subscription = this.eventListeners.get(key);
+      if (!subscription) return;
+
+      const idx = subscription.callbacks.indexOf(callback);
+      if (idx >= 0) subscription.callbacks.splice(idx, 1);
+
+      if (subscription.callbacks.length === 0) {
+        this.eventListeners.delete(key);
+      }
+
+      if (this.eventListeners.size === 0) {
+        this.stopEventPolling();
+      }
     };
   }
 
@@ -316,15 +346,22 @@ export class VeilClient {
     return this.nativeQuery<bigint>('vai_balance', { address });
   }
 
+  /** Get the configured sender address (throws if no signer is configured). */
+  getConfiguredAddress(): string {
+    return this.getAddress();
+  }
+
   // ==========================================================================
   // Internals
   // ==========================================================================
 
   private getAddress(): string {
-    if (!this.signerKey) throw new Error('No signer configured');
-    // In production, derive address from private key
-    // For now, placeholder
-    return '0x' + '0'.repeat(40);
+    if (!this.signerAddress) {
+      throw new Error(
+        'No signer configured. Read methods work without a signer, but write methods require config.signer (private key string or signer object with address).',
+      );
+    }
+    return this.signerAddress;
   }
 
   /** JSON-RPC call to VEIL L1 */
@@ -362,8 +399,129 @@ export class VeilClient {
   /** Native VM query (read-only) */
   private async nativeQuery<T>(
     method: string,
-    params: Record<string, unknown>,
+    params: object,
   ): Promise<T> {
     return this.rpcCall<T>(`veil_${method}`, [params]);
+  }
+
+  private resolveSignerAddress(signer?: string | Signer): string | undefined {
+    if (!signer) return undefined;
+    if (typeof signer === 'string') {
+      return this.deriveAddressFromPrivateKey(signer);
+    }
+    return this.normalizeAddress(signer.address, 'config.signer.address');
+  }
+
+  private deriveAddressFromPrivateKey(privateKey: string): string {
+    try {
+      return computeAddress(privateKey);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Invalid signer private key: ${message}`);
+    }
+  }
+
+  private normalizeAddress(address: string, source: string): string {
+    try {
+      return getAddress(address);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Invalid address in ${source}: ${message}`);
+    }
+  }
+
+  private parseQuantity(value: string, method: string): number {
+    if (typeof value !== 'string' || value.length === 0) {
+      throw new Error(`${method} returned invalid quantity`);
+    }
+
+    const parsed = Number.parseInt(value, value.startsWith('0x') ? 16 : 10);
+    if (!Number.isSafeInteger(parsed) || parsed < 0) {
+      throw new Error(`${method} returned out-of-range quantity: ${value}`);
+    }
+
+    return parsed;
+  }
+
+  private ensureEventPolling(): void {
+    if (this.eventPollTimer || this.eventListeners.size === 0) return;
+
+    // TODO: Prefer server push / websocket subscriptions if the VM exposes them.
+    this.eventPollTimer = setInterval(() => {
+      void this.pollEventSubscriptions();
+    }, DEFAULT_EVENT_POLL_INTERVAL_MS);
+
+    void this.pollEventSubscriptions();
+  }
+
+  private stopEventPolling(): void {
+    if (!this.eventPollTimer) return;
+    clearInterval(this.eventPollTimer);
+    this.eventPollTimer = undefined;
+  }
+
+  private async pollEventSubscriptions(): Promise<void> {
+    if (this.eventPollingInFlight || this.eventListeners.size === 0) return;
+    this.eventPollingInFlight = true;
+
+    try {
+      const latestBlock = await this.getBlockNumber();
+      for (const subscription of this.eventListeners.values()) {
+        await this.pollEventSubscription(subscription, latestBlock);
+      }
+    } catch {
+      // Keep polling alive on transient RPC errors.
+    } finally {
+      this.eventPollingInFlight = false;
+      if (this.eventListeners.size === 0) {
+        this.stopEventPolling();
+      }
+    }
+  }
+
+  private async pollEventSubscription(
+    subscription: EventSubscriptionState,
+    latestBlock: number,
+  ): Promise<void> {
+    const baseFromBlock = subscription.filter.fromBlock ?? latestBlock + 1;
+    const fromBlock = subscription.nextFromBlock ?? baseFromBlock;
+
+    const requestedToBlock = subscription.filter.toBlock;
+    const toBlock = requestedToBlock === undefined
+      ? latestBlock
+      : Math.min(requestedToBlock, latestBlock);
+
+    if (fromBlock > toBlock) {
+      subscription.nextFromBlock = fromBlock;
+      return;
+    }
+
+    const events = await this.getEvents({
+      ...subscription.filter,
+      fromBlock,
+      toBlock,
+    });
+
+    if (events.length === 0) {
+      subscription.nextFromBlock = toBlock + 1;
+      return;
+    }
+
+    let maxSeenBlock = fromBlock;
+    for (const event of events) {
+      if (event.blockNumber > maxSeenBlock) {
+        maxSeenBlock = event.blockNumber;
+      }
+
+      for (const callback of [...subscription.callbacks]) {
+        try {
+          await callback(event);
+        } catch {
+          // Listener exceptions should not stop the polling loop.
+        }
+      }
+    }
+
+    subscription.nextFromBlock = maxSeenBlock + 1;
   }
 }

@@ -3,6 +3,9 @@
 // Native SDK for the VEIL sovereign agent chain
 // ============================================================================
 
+import { VeilClient } from './client.js';
+import type { Signer } from './types.js';
+
 export { VeilClient } from './client.js';
 export { XaiOracle } from './oracle.js';
 export type {
@@ -44,7 +47,7 @@ export const VEIL_CHAIN_ID = 22207;
 
 /** Convenience: create a client with minimal config */
 export function createClient(rpcUrl: string, options?: {
-  signer?: string;
+  signer?: string | Signer;
   xaiApiKey?: string;
 }) {
   return new VeilClient({
