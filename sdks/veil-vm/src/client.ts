@@ -9,6 +9,12 @@ import type {
   Identity,
   ZeroIdProof,
   Signer,
+  CommitOrderRequest,
+  RevealBatchRequest,
+  SubmitBatchProofRequest,
+  ClearBatchRequest,
+  SetProofConfigRequest,
+  SetRevealCommitteeRequest,
   Agent,
   AgentState,
   BloodswornScore,
@@ -31,6 +37,13 @@ interface EventSubscriptionState {
   filter: VeilEventFilter;
   callbacks: VeilEventCallback[];
   nextFromBlock?: number;
+}
+
+interface NativeWriteOptions {
+  /** Explicit sender override for the current RPC call only. */
+  sender?: string;
+  /** Per-call signer override used only to derive sender (no client mutation). */
+  signer?: string | Signer;
 }
 
 export class VeilClient {
@@ -266,6 +279,100 @@ export class VeilClient {
   }
 
   // ==========================================================================
+  // Native Tier 0 (strict-private orderflow + operator controls)
+  // ==========================================================================
+
+  /** Submit a strict-private order commitment (Tier 0 action ID 2). */
+  async commitOrder(
+    request: CommitOrderRequest,
+    options?: NativeWriteOptions,
+  ): Promise<TransactionReceipt> {
+    return this.nativeCall(
+      'commit_order',
+      {
+        marketId: request.marketId,
+        windowId: request.windowId.toString(),
+        envelope: Buffer.from(request.envelope).toString('hex'),
+        commitment: Buffer.from(request.commitment).toString('hex'),
+      },
+      options,
+    );
+  }
+
+  /** Submit a validator reveal share for a batch (Tier 0 action ID 3). */
+  async revealBatch(
+    request: RevealBatchRequest,
+    options?: NativeWriteOptions,
+  ): Promise<TransactionReceipt> {
+    return this.nativeCall(
+      'reveal_batch',
+      {
+        marketId: request.marketId,
+        windowId: request.windowId.toString(),
+        envelopeEpoch: request.envelopeEpoch.toString(),
+        envelopeCommitteeKeyId: Buffer.from(request.envelopeCommitteeKeyId).toString('hex'),
+        decryptionShare: Buffer.from(request.decryptionShare).toString('hex'),
+        validatorIndex: request.validatorIndex,
+      },
+      options,
+    );
+  }
+
+  /** Submit a batch proof artifact (Tier 0 action ID 17). */
+  async submitBatchProof(
+    request: SubmitBatchProofRequest,
+    options?: NativeWriteOptions,
+  ): Promise<TransactionReceipt> {
+    return this.nativeCall(
+      'submit_batch_proof',
+      {
+        marketId: request.marketId,
+        windowId: request.windowId.toString(),
+        windowCloseAtMs: request.windowCloseAtMs,
+        proofType: request.proofType,
+        publicInputsHash: Buffer.from(request.publicInputsHash).toString('hex'),
+        fillsHash: Buffer.from(request.fillsHash).toString('hex'),
+        proof: Buffer.from(request.proof).toString('hex'),
+      },
+      options,
+    );
+  }
+
+  /** Finalize a batch clearing result (Tier 0 action ID 4). */
+  async clearBatch(
+    request: ClearBatchRequest,
+    options?: NativeWriteOptions,
+  ): Promise<TransactionReceipt> {
+    return this.nativeCall(
+      'clear_batch',
+      {
+        marketId: request.marketId,
+        windowId: request.windowId.toString(),
+        clearPrice: request.clearPrice.toString(),
+        totalVolume: request.totalVolume.toString(),
+        fillsHash: Buffer.from(request.fillsHash).toString('hex'),
+      },
+      options,
+    );
+  }
+
+  /** Update proof requirements for batch settlement (Tier 0 action ID 18). */
+  async setProofConfig(
+    request: SetProofConfigRequest,
+    options?: NativeWriteOptions,
+  ): Promise<TransactionReceipt> {
+    return this.nativeCall('set_proof_config', { ...request }, options);
+  }
+
+  /** Update reveal committee membership (Tier 0 action ID 41). */
+  async setRevealCommittee(
+    request: SetRevealCommitteeRequest,
+    options?: NativeWriteOptions,
+  ): Promise<TransactionReceipt> {
+    return this.nativeCall('set_reveal_committee', { ...request }, options);
+  }
+
+  // ==========================================================================
   // Staking (native)
   // ==========================================================================
 
@@ -390,9 +497,10 @@ export class VeilClient {
   private async nativeCall(
     method: string,
     params: Record<string, unknown>,
+    options?: NativeWriteOptions,
   ): Promise<TransactionReceipt> {
     return this.rpcCall<TransactionReceipt>(`veil_${method}`, [
-      { ...params, sender: this.getAddress() },
+      { ...params, sender: this.getSenderAddress(options) },
     ]);
   }
 
@@ -410,6 +518,17 @@ export class VeilClient {
       return this.deriveAddressFromPrivateKey(signer);
     }
     return this.normalizeAddress(signer.address, 'config.signer.address');
+  }
+
+  private getSenderAddress(options?: NativeWriteOptions): string {
+    if (options?.sender) {
+      return this.normalizeAddress(options.sender, 'call options.sender');
+    }
+    if (options?.signer) {
+      const sender = this.resolveSignerAddress(options.signer);
+      if (sender) return sender;
+    }
+    return this.getAddress();
   }
 
   private deriveAddressFromPrivateKey(privateKey: string): string {

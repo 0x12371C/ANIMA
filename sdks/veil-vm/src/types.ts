@@ -48,6 +48,105 @@ export interface ChainEvent {
   transactionHash: string;
 }
 
+// --- Native Tier 0 (strict-private actions) ---
+
+export interface Tier0ActionResponse<TResult> {
+  /** Transaction receipt for the submitted native action */
+  receipt: TransactionReceipt;
+  /** Decoded action result payload, when available */
+  result?: TResult;
+}
+
+export interface CommitOrderRequest {
+  marketId: string;
+  windowId: bigint;
+  envelope: Uint8Array;
+  commitment: Uint8Array;
+}
+
+export interface CommitOrderResult {
+  windowId: bigint;
+}
+
+export interface CommitOrderResponse extends Tier0ActionResponse<CommitOrderResult> {}
+
+export interface RevealBatchRequest {
+  marketId: string;
+  windowId: bigint;
+  envelopeEpoch: bigint;
+  envelopeCommitteeKeyId: Uint8Array;
+  decryptionShare: Uint8Array;
+  validatorIndex: number;
+}
+
+export interface RevealBatchResult {
+  validatorIndex: number;
+}
+
+export interface RevealBatchResponse extends Tier0ActionResponse<RevealBatchResult> {}
+
+export interface ClearBatchRequest {
+  marketId: string;
+  windowId: bigint;
+  clearPrice: bigint;
+  totalVolume: bigint;
+  fillsHash: Uint8Array;
+}
+
+export interface ClearBatchResult {
+  clearPrice: bigint;
+  totalVolume: bigint;
+}
+
+export interface ClearBatchResponse extends Tier0ActionResponse<ClearBatchResult> {}
+
+export interface SubmitBatchProofRequest {
+  marketId: string;
+  windowId: bigint;
+  windowCloseAtMs: number;
+  proofType: number;
+  publicInputsHash: Uint8Array;
+  fillsHash: Uint8Array;
+  proof: Uint8Array;
+}
+
+export interface SubmitBatchProofResult {
+  submittedAtMs: number;
+  proofCommitment: Uint8Array;
+  storedProofBytes: number;
+  glyphClass: number;
+  glyphRarity: number;
+}
+
+export interface SubmitBatchProofResponse
+  extends Tier0ActionResponse<SubmitBatchProofResult> {}
+
+export interface SetProofConfigRequest {
+  requireProof: boolean;
+  requiredProofType: number;
+  requiredCircuitId: string;
+  batchWindowMs: number;
+  proofDeadlineMs: number;
+  revealThresholdX: number;
+  revealThresholdY: number;
+  proverAuthority: string;
+}
+
+export interface SetProofConfigResult extends SetProofConfigRequest {}
+
+export interface SetProofConfigResponse
+  extends Tier0ActionResponse<SetProofConfigResult> {}
+
+export interface SetRevealCommitteeRequest {
+  validatorIndex: number;
+  member: string;
+}
+
+export interface SetRevealCommitteeResult extends SetRevealCommitteeRequest {}
+
+export interface SetRevealCommitteeResponse
+  extends Tier0ActionResponse<SetRevealCommitteeResult> {}
+
 // --- Identity (ZER0ID native) ---
 
 export interface ZeroIdProof {
