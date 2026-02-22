@@ -329,7 +329,7 @@ func (r *Runtime) handleAdolescent(ctx context.Context) error {
 	// - Replicate (if bloodsworn sovereign — network decides, not self)
 
 	// Check replication eligibility
-	if r.evScore != nil && bloodsworn.CanReplicate(r.evScore) {
+	if r.evScore != nil && bloodsworn.CanReplicate(r.evScore, r.milestones, r.swornSince(), r.recentSlashCount()) {
 		if r.turnCount%500 == 0 { // Don't spam this
 			log.Printf("[ANIMA] Replication rights active — Bloodsworn: %s | EV: %.3f",
 				r.evScore.BloodswornTier, r.evScore.NetEV)
@@ -391,11 +391,21 @@ func (r *Runtime) refreshBalances(ctx context.Context) {
 	// r.veilBalance = chain.GetVEILBalance(ctx, r.cfg.Address)
 }
 
+func (r *Runtime) swornSince() time.Time {
+	// TODO: Track when agent first reached sworn tier on-chain
+	return r.bootTime
+}
+
+func (r *Runtime) recentSlashCount() int {
+	// TODO: Query chain for slash events in last 30 days
+	return 0
+}
+
 func (r *Runtime) recomputeEV(ctx context.Context) {
 	if r.chain == nil {
 		return
 	}
-	ev, err := bloodsworn.ComputeEV(ctx, r.chain, r.cfg.Address)
+	ev, err := bloodsworn.ComputeEV(ctx, r.chain, r.cfg.Address, r.state, r.evScore)
 	if err != nil {
 		log.Printf("[ANIMA] EV recomputation failed: %v", err)
 		return
