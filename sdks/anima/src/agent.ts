@@ -5,8 +5,11 @@
 // The Brain interface remains action-based (context/events in, actions out).
 // ============================================================================
 
-import { VeilClient, type AgentState, type BloodswornTier } from '@veil/vm-sdk';
+import { VeilClient, type AgentState, type BloodswornTier, type Signer } from '@veil/vm-sdk';
+import { ANIMA_STRICT_PRIVATE_DEFAULT_ADMITTED_ACTION_TYPES } from './types.js';
 import type {
+  AgentActionType,
+  AnimaSignerRoleKey,
   AnimaConfig,
   Brain,
   AgentContext,
@@ -17,6 +20,28 @@ import type {
   LifecycleHooks,
   MarketSummary,
 } from './types.js';
+
+type NativeTier0WriteOptions = {
+  sender?: string;
+  signer?: string | Signer;
+};
+
+type VeilClientWithTier0Methods = VeilClient & {
+  commitOrder?: (request: Record<string, unknown>, options?: NativeTier0WriteOptions) => Promise<unknown>;
+  revealBatch?: (request: Record<string, unknown>, options?: NativeTier0WriteOptions) => Promise<unknown>;
+  submitBatchProof?: (request: Record<string, unknown>, options?: NativeTier0WriteOptions) => Promise<unknown>;
+  clearBatch?: (request: Record<string, unknown>, options?: NativeTier0WriteOptions) => Promise<unknown>;
+  setProofConfig?: (request: Record<string, unknown>, options?: NativeTier0WriteOptions) => Promise<unknown>;
+  setRevealCommittee?: (request: Record<string, unknown>, options?: NativeTier0WriteOptions) => Promise<unknown>;
+};
+
+type Tier0ClientMethodName =
+  | 'commitOrder'
+  | 'revealBatch'
+  | 'submitBatchProof'
+  | 'clearBatch'
+  | 'setProofConfig'
+  | 'setRevealCommittee';
 
 export class AnimaAgent {
   private client: VeilClient;
@@ -215,10 +240,72 @@ export class AnimaAgent {
     for (const action of actions) {
       if (!this.running) return;
       try {
+        this.enforceActionExecutionPolicy(action);
+
         switch (action.type) {
+          case 'commit_order':
+            await this.executeTier0ClientMethod(
+              'commit_order',
+              'commitOrder',
+              action.request,
+              action.signerRole,
+            );
+            console.log('[ANIMA] Tier 0 commit_order submitted');
+            break;
+
+          case 'reveal_batch':
+            await this.executeTier0ClientMethod(
+              'reveal_batch',
+              'revealBatch',
+              action.request,
+              action.signerRole,
+            );
+            console.log('[ANIMA] Tier 0 reveal_batch submitted');
+            break;
+
+          case 'submit_batch_proof':
+            await this.executeTier0ClientMethod(
+              'submit_batch_proof',
+              'submitBatchProof',
+              action.request,
+              action.signerRole,
+            );
+            console.log('[ANIMA] Tier 0 submit_batch_proof submitted');
+            break;
+
+          case 'clear_batch':
+            await this.executeTier0ClientMethod(
+              'clear_batch',
+              'clearBatch',
+              action.request,
+              action.signerRole,
+            );
+            console.log('[ANIMA] Tier 0 clear_batch submitted');
+            break;
+
+          case 'set_proof_config':
+            await this.executeTier0ClientMethod(
+              'set_proof_config',
+              'setProofConfig',
+              action.request,
+              action.signerRole,
+            );
+            console.log('[ANIMA] Tier 0 set_proof_config submitted');
+            break;
+
+          case 'set_reveal_committee':
+            await this.executeTier0ClientMethod(
+              'set_reveal_committee',
+              'setRevealCommittee',
+              action.request,
+              action.signerRole,
+            );
+            console.log('[ANIMA] Tier 0 set_reveal_committee submitted');
+            break;
+
           case 'trade':
             await this.client.trade(action.marketId, action.outcome, action.amount);
-            console.log(`[ANIMA] Trade: ${action.outcome} on ${action.marketId} for ${action.amount}`);
+            console.log(`[ANIMA] Trade (compatibility): ${action.outcome} on ${action.marketId} for ${action.amount}`);
             break;
 
           case 'create_market':
@@ -389,6 +476,123 @@ export class AnimaAgent {
   // ==========================================================================
   // Helpers
   // ==========================================================================
+
+  private isStrictPrivateMode(): boolean {
+    return (this.config.capabilityMode ?? 'strict-private') === 'strict-private';
+  }
+
+  private enforceActionExecutionPolicy(action: AgentAction): void {
+    const actionType = action.type;
+    if (actionType === 'noop') return;
+
+    if (this.isStrictPrivateMode() && !this.isStrictPrivateActionAdmitted(actionType)) {
+      if (actionType === 'trade') {
+        throw new Error(
+          '[ANIMA] Legacy action "trade" is blocked by strict-private native policy. Emit a Tier 0 "commit_order" action instead (trade fields alone do not provide the full private request payload). To explicitly allow legacy trade for compatibility testing, set config.strictPrivateOverrides.actionAdmission.trade = true and enable compatibility/deprecated-surface overrides.',
+        );
+      }
+
+      throw new Error(
+        `[ANIMA] Action "${actionType}" is blocked by strict-private native policy. Admitted actions: ${this.getStrictPrivateAdmittedActionTypes().join(', ')}. To allow it, set config.strictPrivateOverrides.actionAdmission.${actionType} = true (legacy compatibility actions also require compatibility/deprecated-surface overrides).`,
+      );
+    }
+
+    if (this.isLegacyCompatibilityAction(actionType) && !this.areCompatibilityRailsEnabled()) {
+      throw new Error(
+        `[ANIMA] Action "${actionType}" is blocked in ANIMA native mode because legacy compatibility rails are disabled. Set config.strictPrivateOverrides.enableEvmCompatibilityRails = true (or strictPrivateDefaults.enableEvmCompatibilityRails = true) only for explicit compatibility testing.`,
+      );
+    }
+
+    if (this.isLegacyCompatibilityAction(actionType) && !this.areDeprecatedSurfacesAllowed()) {
+      throw new Error(
+        `[ANIMA] Action "${actionType}" targets a deprecated VEIL2/legacy execution surface and is blocked in ANIMA native mode. Use Tier 0 actions instead (commit_order, reveal_batch, submit_batch_proof, clear_batch, set_proof_config, set_reveal_committee), or explicitly set config.strictPrivateOverrides.allowDeprecatedSurfaces = true for non-default compatibility testing.`,
+      );
+    }
+  }
+
+  private isStrictPrivateActionAdmitted(actionType: AgentActionType): boolean {
+    const override = this.config.strictPrivateOverrides?.actionAdmission?.[actionType];
+    if (override === true) return true;
+    if (override === false) return false;
+    return this.getStrictPrivateAdmittedActionTypes().includes(actionType);
+  }
+
+  private getStrictPrivateAdmittedActionTypes(): AgentActionType[] {
+    const defaults =
+      this.config.strictPrivateDefaults?.admittedActionTypes ??
+      ANIMA_STRICT_PRIVATE_DEFAULT_ADMITTED_ACTION_TYPES;
+    return [...new Set(defaults)];
+  }
+
+  private areCompatibilityRailsEnabled(): boolean {
+    return this.config.strictPrivateOverrides?.enableEvmCompatibilityRails
+      ?? this.config.strictPrivateDefaults?.enableEvmCompatibilityRails
+      ?? false;
+  }
+
+  private areDeprecatedSurfacesAllowed(): boolean {
+    return this.config.strictPrivateOverrides?.allowDeprecatedSurfaces
+      ?? this.config.strictPrivateDefaults?.allowDeprecatedSurfaces
+      ?? false;
+  }
+
+  private isLegacyCompatibilityAction(actionType: AgentActionType): boolean {
+    switch (actionType) {
+      case 'trade':
+      case 'create_market':
+      case 'resolve_market':
+      case 'stake':
+      case 'unstake':
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  private async executeTier0ClientMethod(
+    actionType: AgentActionType,
+    methodName: Tier0ClientMethodName,
+    request: Record<string, unknown>,
+    signerRoleHint?: AnimaSignerRoleKey,
+  ): Promise<void> {
+    const tier0Client = this.client as VeilClientWithTier0Methods;
+    const method = tier0Client[methodName];
+
+    if (typeof method !== 'function') {
+      throw new Error(
+        `[ANIMA] ${actionType} requested, but VeilClient.${methodName}(...) is not available yet. Update the VEIL VM client (LB-02/LB-03) and retry.`,
+      );
+    }
+
+    const options = this.resolveTier0WriteOptions(actionType, signerRoleHint);
+    await method.call(tier0Client, request, options);
+  }
+
+  private resolveTier0WriteOptions(
+    actionType: AgentActionType,
+    signerRoleHint?: AnimaSignerRoleKey,
+  ): NativeTier0WriteOptions | undefined {
+    const signerRole = this.resolveSignerRoleForAction(actionType, signerRoleHint);
+    if (!signerRole) return undefined;
+
+    const signerMaterial = this.config.signerRegistry?.byRole?.[signerRole];
+    if (signerMaterial === undefined) {
+      throw new Error(
+        `[ANIMA] Action "${actionType}" requested signer role "${signerRole}", but no concrete signer material is configured at config.signerRegistry.byRole["${signerRole}"]. Configure that role with a private key or @veil/vm-sdk Signer, or remove the signer role route.`,
+      );
+    }
+
+    return { signer: signerMaterial };
+  }
+
+  private resolveSignerRoleForAction(
+    actionType: AgentActionType,
+    signerRoleHint?: AnimaSignerRoleKey,
+  ): AnimaSignerRoleKey | undefined {
+    if (signerRoleHint) return signerRoleHint;
+    const mapping = this.config.signerRoleMapping;
+    return mapping?.byActionType?.[actionType] ?? mapping?.defaultRole;
+  }
 
   private async getContext(): Promise<AgentContext> {
     const address = this.getAddress();
