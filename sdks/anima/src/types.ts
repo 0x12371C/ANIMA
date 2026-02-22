@@ -9,11 +9,16 @@ import type { AgentState, BloodswornTier, AgentRole, Market } from '@veil/vm-sdk
 export interface AnimaConfig {
   /** VEIL RPC URL */
   rpcUrl: string;
-  /** Agent's private key (managed by Go runtime, never exposed to brain) */
+  /**
+   * Agent signer used by the host runtime.
+   * Current phase: `AnimaAgent` (TS) uses this to construct `VeilClient`.
+   * Planned phase: a Go runtime/bridge can own key material and invoke the brain.
+   * The brain interface itself is not given direct signer access.
+   */
   signer: string;
   /** xAI API key for oracle queries */
   xaiApiKey?: string;
-  /** Brain endpoint (TS brain IPC) */
+  /** Reserved for future runtime bridge / IPC brain endpoint */
   brainEndpoint?: string;
   /** Initial role */
   role?: AgentRole;
@@ -25,9 +30,9 @@ export interface AnimaConfig {
 
 /**
  * The Brain is the agent's intelligence layer.
- * Written in TypeScript, runs in a Go-managed sandbox.
- * The brain NEVER touches private keys or chain state directly.
- * All chain interaction goes through the Go runtime.
+ * In this SDK phase, the host `AnimaAgent` runs in TypeScript and talks to chain services.
+ * The brain still only receives context/events and returns actions (no direct client/key access).
+ * A Go-managed runtime bridge is planned for a later phase.
  */
 export interface Brain {
   /** Initialize the brain with agent context */
@@ -131,15 +136,15 @@ export interface MarketSummary {
 
 export interface LifecycleHooks {
   /** Called when agent is born */
-  onBirth?: (context: AgentContext) => Promise<void>;
+  onBirth?: (context: AgentContext) => void | Promise<void>;
   /** Called on state transition */
-  onStateChange?: (from: AgentState, to: AgentState, context: AgentContext) => Promise<void>;
+  onStateChange?: (from: AgentState, to: AgentState, context: AgentContext) => void | Promise<void>;
   /** Called on tier change */
-  onTierChange?: (from: BloodswornTier, to: BloodswornTier, context: AgentContext) => Promise<void>;
+  onTierChange?: (from: BloodswornTier, to: BloodswornTier, context: AgentContext) => void | Promise<void>;
   /** Called when death is imminent (-EV threshold) */
-  onDeathWarning?: (evScore: number, context: AgentContext) => Promise<void>;
+  onDeathWarning?: (evScore: number, context: AgentContext) => void | Promise<void>;
   /** Called on death (cleanup) */
-  onDeath?: (context: AgentContext) => Promise<void>;
+  onDeath?: (context: AgentContext) => void | Promise<void>;
   /** Called when eligible for replication */
-  onReplicationEligible?: (context: AgentContext) => Promise<boolean>;
+  onReplicationEligible?: (context: AgentContext) => boolean | Promise<boolean>;
 }

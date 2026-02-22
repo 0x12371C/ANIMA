@@ -1,8 +1,8 @@
 // ============================================================================
 // @veil/anima — Agent Runtime (TypeScript side)
-// This is the SDK developers use to build agent brains.
-// The Go runtime manages lifecycle, keys, and chain state.
-// This manages intelligence, strategy, and decision-making.
+// Current phase: the TS host runtime instantiates VeilClient and executes actions.
+// Planned phase: a Go runtime bridge can own lifecycle/keys/chain access and call the brain.
+// The Brain interface remains action-based (context/events in, actions out).
 // ============================================================================
 
 import { VeilClient, type AgentState, type BloodswornTier } from '@veil/vm-sdk';
@@ -24,6 +24,11 @@ export class AnimaAgent {
   private hooks: LifecycleHooks;
   private config: AnimaConfig;
   private running = false;
+  private starting = false;
+  private stopping = false;
+  private brainInitialized = false;
+  private subscribed = false;
+  private eventUnsubscribers: Array<() => void> = [];
   private thinkInterval: ReturnType<typeof setTimeout> | null = null;
   private lastThinkTime = 0;
   private eventQueue: AgentEvent[] = [];
@@ -45,40 +50,92 @@ export class AnimaAgent {
 
   /** Boot the agent. Connects to chain, initializes brain, starts think loop. */
   async start(): Promise<void> {
-    // Verify chain connection
-    const connected = await this.client.ping();
-    if (!connected) throw new Error('Cannot connect to VEIL L1');
-
-    // Get current agent state
-    const context = await this.getContext();
-
-    // Initialize brain
-    await this.brain.init(context);
-
-    // Fire birth hook if newborn
-    if (context.state === 'newborn' && this.hooks.onBirth) {
-      await this.hooks.onBirth(context);
+    if (this.running || this.starting) {
+      throw new Error('Agent is already starting or running');
     }
 
-    // Subscribe to relevant events
-    this.subscribeEvents();
+    this.starting = true;
 
-    // Start think loop
-    this.running = true;
-    this.scheduleThink(0);
+    try {
+      // Verify chain connection
+      const connected = await this.client.ping();
+      if (!connected) throw new Error('Cannot connect to VEIL L1');
 
-    console.log(`[ANIMA] Agent ${context.address} online | state: ${context.state} | tier: ${context.tier}`);
+      // Get current agent state
+      const context = await this.getContext();
+
+      // Initialize brain
+      await this.brain.init(context);
+      this.brainInitialized = true;
+
+      if (!this.starting) return;
+
+      // Fire birth hook if newborn
+      if (context.state === 'newborn' && this.hooks.onBirth) {
+        await this.hooks.onBirth(context);
+      }
+
+      if (!this.starting) return;
+
+      // Subscribe to relevant events
+      this.running = true;
+      this.eventQueue = [];
+      this.lastThinkTime = 0;
+      this.subscribeEvents();
+
+      // Start think loop
+      this.scheduleThink(0);
+
+      console.log(`[ANIMA] Agent ${context.address} online | state: ${context.state} | tier: ${context.tier}`);
+    } catch (error) {
+      this.running = false;
+      if (this.thinkInterval) {
+        clearTimeout(this.thinkInterval);
+        this.thinkInterval = null;
+      }
+      this.unsubscribeEvents();
+      this.eventQueue = [];
+      if (this.brainInitialized) {
+        try {
+          await this.brain.shutdown();
+        } catch (shutdownError) {
+          console.error('[ANIMA] Brain shutdown after failed start error:', shutdownError);
+        } finally {
+          this.brainInitialized = false;
+        }
+      }
+      throw error;
+    } finally {
+      this.starting = false;
+    }
   }
 
   /** Stop the agent gracefully. */
   async stop(): Promise<void> {
+    if (this.stopping) return;
+    if (!this.running && !this.starting && !this.brainInitialized) return;
+
+    this.stopping = true;
     this.running = false;
+    this.starting = false;
+
     if (this.thinkInterval) {
       clearTimeout(this.thinkInterval);
       this.thinkInterval = null;
     }
-    await this.brain.shutdown();
-    console.log('[ANIMA] Agent stopped');
+
+    this.unsubscribeEvents();
+    this.eventQueue = [];
+
+    try {
+      if (this.brainInitialized) {
+        await this.brain.shutdown();
+        this.brainInitialized = false;
+      }
+      console.log('[ANIMA] Agent stopped');
+    } finally {
+      this.stopping = false;
+    }
   }
 
   // ==========================================================================
@@ -87,16 +144,22 @@ export class AnimaAgent {
 
   private scheduleThink(delayMs: number): void {
     if (!this.running) return;
+    if (this.thinkInterval) {
+      clearTimeout(this.thinkInterval);
+    }
     this.thinkInterval = setTimeout(() => this.thinkCycle(), delayMs);
   }
 
   private async thinkCycle(): Promise<void> {
     if (!this.running) return;
+    this.thinkInterval = null;
 
     try {
       const context = await this.getContext();
+      if (!this.running) return;
       const markets = await this.getAvailableMarkets();
-      const elapsed = Date.now() - this.lastThinkTime;
+      if (!this.running) return;
+      const elapsed = this.lastThinkTime === 0 ? 0 : Date.now() - this.lastThinkTime;
 
       // Check for death
       if (context.state === 'dead') {
@@ -118,14 +181,17 @@ export class AnimaAgent {
 
       // Let the brain decide
       const output = await this.brain.think(input);
+      if (!this.running) return;
       this.lastThinkTime = Date.now();
 
       // Execute actions
       await this.executeActions(output.actions, context);
+      if (!this.running) return;
 
       // Auto-advance lifecycle if configured
       if (this.config.autoAdvance) {
         await this.checkLifecycleAdvance(context);
+        if (!this.running) return;
       }
 
       // Schedule next think
@@ -134,7 +200,7 @@ export class AnimaAgent {
     } catch (error) {
       console.error('[ANIMA] Think cycle error:', error);
       // Retry after backoff
-      this.scheduleThink(60_000);
+      if (this.running) this.scheduleThink(60_000);
     }
   }
 
@@ -147,6 +213,7 @@ export class AnimaAgent {
     context: AgentContext,
   ): Promise<void> {
     for (const action of actions) {
+      if (!this.running) return;
       try {
         switch (action.type) {
           case 'trade':
@@ -229,6 +296,11 @@ export class AnimaAgent {
     const transition = transitions[context.state];
     if (transition && transition.check()) {
       await this.client.transitionState(transition.next);
+      this.eventQueue.push({
+        type: 'state_changed',
+        from: context.state,
+        to: transition.next,
+      });
       if (this.hooks.onStateChange) {
         await this.hooks.onStateChange(context.state, transition.next, context);
       }
@@ -261,8 +333,11 @@ export class AnimaAgent {
   // ==========================================================================
 
   private subscribeEvents(): void {
+    if (this.subscribed) return;
+    this.subscribed = true;
+
     // Subscribe to chain events relevant to this agent
-    this.client.on({ eventType: 'MarketCreated' }, async (event) => {
+    this.trackSubscription(this.client.on({ eventType: 'MarketCreated' }, async (event) => {
       const agentEvent: AgentEvent = {
         type: 'market_created',
         market: {
@@ -273,21 +348,19 @@ export class AnimaAgent {
           state: 'open',
         },
       };
-      this.eventQueue.push(agentEvent);
-      await this.brain.onEvent(agentEvent);
-    });
+      await this.handleBrainEvent(agentEvent);
+    }));
 
-    this.client.on({ eventType: 'MarketResolved' }, async (event) => {
+    this.trackSubscription(this.client.on({ eventType: 'MarketResolved' }, async (event) => {
       const agentEvent: AgentEvent = {
         type: 'market_resolved',
         marketId: event.args['marketId'] as string,
         outcome: event.args['outcome'] as string,
       };
-      this.eventQueue.push(agentEvent);
-      await this.brain.onEvent(agentEvent);
-    });
+      await this.handleBrainEvent(agentEvent);
+    }));
 
-    this.client.on({ eventType: 'BloodswornUpdated' }, async (event) => {
+    this.trackSubscription(this.client.on({ eventType: 'BloodswornUpdated' }, async (event) => {
       const newTier = event.args['tier'] as BloodswornTier;
       const oldTier = event.args['previousTier'] as BloodswornTier;
       if (newTier !== oldTier) {
@@ -296,20 +369,21 @@ export class AnimaAgent {
           from: oldTier,
           to: newTier,
         };
-        this.eventQueue.push(agentEvent);
+        await this.handleBrainEvent(agentEvent);
+        if (!this.running) return;
         if (this.hooks.onTierChange) {
           await this.hooks.onTierChange(oldTier, newTier, await this.getContext());
         }
       }
-    });
+    }));
 
-    this.client.on({ eventType: 'StakeSlashed' }, async (event) => {
-      this.eventQueue.push({
+    this.trackSubscription(this.client.on({ eventType: 'StakeSlashed' }, async (event) => {
+      await this.handleBrainEvent({
         type: 'slashed',
         amount: event.args['amount'] as bigint,
         reason: event.args['reason'] as string,
       });
-    });
+    }));
   }
 
   // ==========================================================================
@@ -359,7 +433,42 @@ export class AnimaAgent {
   }
 
   private getAddress(): string {
-    // Derive from signer
-    return '0x' + '0'.repeat(40); // Placeholder
+    return this.client.getConfiguredAddress();
+  }
+
+  private trackSubscription(unsubscribe: unknown): void {
+    if (typeof unsubscribe === 'function') {
+      this.eventUnsubscribers.push(unsubscribe as () => void);
+    }
+  }
+
+  private unsubscribeEvents(): void {
+    for (const unsubscribe of this.eventUnsubscribers.splice(0)) {
+      try {
+        unsubscribe();
+      } catch (error) {
+        console.error('[ANIMA] Event unsubscribe error:', error);
+      }
+    }
+    this.subscribed = false;
+  }
+
+  private async handleBrainEvent(agentEvent: AgentEvent): Promise<void> {
+    if (!this.running) return;
+
+    this.eventQueue.push(agentEvent);
+
+    try {
+      const output = await this.brain.onEvent(agentEvent);
+      if (!this.running || !output) return;
+      if (output.actions.length === 0) return;
+
+      const context = await this.getContext();
+      if (!this.running) return;
+
+      await this.executeActions(output.actions, context);
+    } catch (error) {
+      console.error(`[ANIMA] Event handler error (${agentEvent.type}):`, error);
+    }
   }
 }
