@@ -5,11 +5,33 @@
 
 import type {
   Credential,
+  CredentialType,
   TrustLevel,
   ZkProof,
   ProofBundle,
   EncryptedEscrow,
 } from './types.js';
+
+async function getRuntimeCrypto(): Promise<Crypto> {
+  const globalCrypto = globalThis.crypto;
+  if (globalCrypto?.subtle && typeof globalCrypto.getRandomValues === 'function') {
+    return globalCrypto;
+  }
+
+  try {
+    const nodeCrypto = await import('node:crypto');
+    const webCrypto = nodeCrypto.webcrypto as Crypto | undefined;
+    if (webCrypto?.subtle && typeof webCrypto.getRandomValues === 'function') {
+      return webCrypto;
+    }
+  } catch {
+    // Ignore import errors and fall through to a single actionable error.
+  }
+
+  throw new Error(
+    'Web Crypto API is unavailable. Provide globalThis.crypto (browser/modern runtime) or use Node.js with node:crypto.webcrypto support.',
+  );
+}
 
 /**
  * Client-side ZK prover for ZER0ID.
@@ -63,13 +85,21 @@ export class ZeroIdProver {
 
   /**
    * Create encrypted escrow for L2+ credentials.
-   * PII is encrypted to the regulator's public key.
-   * Only decryptable by regulator (e.g., court order).
+   *
+   * Current SDK phase limitation:
+   * - PII is encrypted under a fresh AES-GCM content key
+   * - regulator public-key wrapping for that content key is NOT implemented yet
+   * - returned escrow metadata is therefore not regulator-decryptable yet
    */
   async createEscrow(
     credentials: Credential[],
     regulatorPubKey: string,
   ): Promise<EncryptedEscrow> {
+    if (!regulatorPubKey.trim()) {
+      throw new Error('regulatorPubKey is required for escrow metadata');
+    }
+
+    const runtimeCrypto = await getRuntimeCrypto();
     const plaintext = JSON.stringify(
       credentials.map((c) => ({
         type: c.type,
@@ -82,41 +112,44 @@ export class ZeroIdProver {
     const data = encoder.encode(plaintext);
 
     // Generate random key and nonce
-    const key = await crypto.subtle.generateKey(
+    const key = await runtimeCrypto.subtle.generateKey(
       { name: 'AES-GCM', length: 256 },
-      true,
+      false,
       ['encrypt'],
     );
-    const nonce = crypto.getRandomValues(new Uint8Array(12));
+    const nonce = runtimeCrypto.getRandomValues(new Uint8Array(12));
 
     // Encrypt PII
     const ciphertext = new Uint8Array(
-      await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, key, data),
+      await runtimeCrypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, key, data),
     );
 
     // Hash plaintext for integrity
-    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+    const hashBuffer = await runtimeCrypto.subtle.digest('SHA-256', data);
     const plaintextHash =
       '0x' +
       Array.from(new Uint8Array(hashBuffer))
         .map((b) => b.toString(16).padStart(2, '0'))
         .join('');
 
-    // TODO: Encrypt AES key with regulator's RSA/ECIES public key
-    // For now, this is the structure
+    // Regulator public-key wrapping for the AES key is intentionally not
+    // represented as complete until key import/algorithm support is finalized.
 
     return {
       ciphertext,
       nonce,
       regulatorPubKey,
       plaintextHash,
+      keyWrappingStatus: 'not_implemented',
+      wrappedKey: null,
+      wrappedKeyAlgorithm: null,
     };
   }
 
   private validateCredentials(credentials: Credential[], targetLevel: TrustLevel): void {
     const types = new Set(credentials.map((c) => c.type));
 
-    const requirements: Record<TrustLevel, string[]> = {
+    const requirements: Record<TrustLevel, CredentialType[]> = {
       0: ['uniqueness'],
       1: ['uniqueness', 'age'],
       2: ['uniqueness', 'age', 'identity_lite'],

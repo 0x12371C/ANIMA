@@ -5,12 +5,17 @@
 
 export { ZeroIdProver } from './prover.js';
 export { ZeroIdVerifier } from './verifier.js';
+export {
+  serializeProofForVeilVm,
+  toVeilVmRegisterIdentityPayload,
+} from './interop.js';
 export type {
   TrustLevel,
   Credential,
   CredentialType,
   ZkProof,
   ProofBundle,
+  ZeroIdRegisterIdentityPayload,
   RegistrationResult,
   VerificationResult,
   ZeroIdConfig,

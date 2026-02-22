@@ -1,15 +1,15 @@
 // ============================================================================
-// @veil/zeroid — Types
+// @veil/zeroid - Types
 // ============================================================================
 
 export type TrustLevel = 0 | 1 | 2 | 3 | 4;
 
 /** Trust level definitions:
- * L0 — Unique human (sybil-resistant, no PII)
- * L1 — Age-verified (18+, no identity)
- * L2 — KYC-lite (name + country, encrypted escrow)
- * L3 — KYC-full (government ID verified, encrypted escrow)
- * L4 — Accredited (financial qualification, encrypted escrow)
+ * L0 - Unique human (sybil-resistant, no PII)
+ * L1 - Age-verified (18+, no identity)
+ * L2 - KYC-lite (name + country, escrow blob; key wrapping pending)
+ * L3 - KYC-full (government ID verified, escrow blob; key wrapping pending)
+ * L4 - Accredited (financial qualification, escrow blob; key wrapping pending)
  */
 
 // --- Credentials ---
@@ -60,6 +60,17 @@ export interface ProofBundle {
 
 // --- Registration ---
 
+export interface ZeroIdRegisterIdentityPayload {
+  /** Serialized proof bytes (UTF-8 bytes of JSON.stringify(bundle.proof)) */
+  proof: Uint8Array;
+  /** Public signals as decimal strings */
+  publicSignals: string[];
+  /** Trust level proven */
+  trustLevel: TrustLevel;
+  /** Nullifier hash (prevents double registration) */
+  nullifierHash: string;
+}
+
 export interface RegistrationResult {
   /** Transaction hash on VEIL chain */
   txHash: string;
@@ -108,8 +119,22 @@ export interface EncryptedEscrow {
   ciphertext: Uint8Array;
   /** Encryption nonce */
   nonce: Uint8Array;
-  /** Regulator's public key used for encryption */
+  /** Target regulator public key metadata (content-key wrapping pending) */
   regulatorPubKey: string;
   /** Hash of plaintext (for integrity) */
   plaintextHash: string;
+  /**
+   * Regulator key wrapping status for the content-encryption key.
+   * Current SDK phase returns 'not_implemented' and does not produce a wrapped key.
+   */
+  keyWrappingStatus: 'not_implemented' | 'wrapped';
+  /**
+   * Wrapped content-encryption key for regulator decryption.
+   * Null until public-key wrapping is implemented.
+   */
+  wrappedKey: Uint8Array | null;
+  /**
+   * Key wrapping algorithm identifier (for example RSA-OAEP/ECIES) when implemented.
+   */
+  wrappedKeyAlgorithm: string | null;
 }
