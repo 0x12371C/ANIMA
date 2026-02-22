@@ -1,0 +1,29 @@
+{
+  "name": "@veil/vm-sdk",
+  "version": "0.1.0",
+  "description": "VEIL VM SDK — native chain interaction, identity, reputation, and truth resolution",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest",
+    "lint": "eslint src/"
+  },
+  "keywords": ["veil", "avalanche", "l1", "vm", "sdk", "blockchain"],
+  "license": "MIT",
+  "dependencies": {
+    "ethers": "^6.13.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0",
+    "@types/node": "^22.0.0"
+  }
+}
